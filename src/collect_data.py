@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -66,18 +65,18 @@ def fetch_historical_ohlcv(
     sleep_sec: float = 0.15,
 ) -> pd.DataFrame:
     """
-    Upbit에서 과거 데이터를 여러 번 나눠 받아 total_count개 정도 모은다.
+    Upbit에서 최신 기준 total_count개 정도의 과거 데이터를 가져온다.
 
     주의:
-    - pyupbit.get_ohlcv는 한 번에 count 개수만큼만 가져온다.
-    - 과거로 거슬러 올라가려면 `to`를 이전 데이터의 시작 시각으로 옮겨가며 반복 호출해야 한다.
+    - pyupbit.get_ohlcv는 count가 200을 초과하면 내부에서 여러 번 요청한다.
+    - 직접 `to`를 넘겨 페이지네이션하면 KST/UTC 차이로 같은 200개만 반복 수집될 수 있다.
 
     Args:
         ticker: 종목명
         interval: 봉 단위
         total_count: 목표 캔들 수
-        chunk_size: 한 번 호출 시 가져올 개수 (보통 200 이하 권장)
-        sleep_sec: 호출 간 대기 시간
+        chunk_size: 이전 버전 호환용 인자. pyupbit 내부 페이지네이션을 사용하므로 직접 사용하지 않음
+        sleep_sec: pyupbit 내부 반복 요청 간 대기 시간
 
     Returns:
         병합된 OHLCV DataFrame
@@ -85,42 +84,24 @@ def fetch_historical_ohlcv(
     if total_count <= 0:
         raise ValueError("total_count는 1 이상이어야 합니다.")
 
-    dfs: list[pd.DataFrame] = []
-    fetched = 0
-    to: Optional[str] = None
+    _ = chunk_size
 
-    while fetched < total_count:
-        current_count = min(chunk_size, total_count - fetched)
+    df = pyupbit.get_ohlcv(
+        ticker=ticker,
+        interval=interval,
+        count=total_count,
+        period=sleep_sec,
+    )
 
-        df = fetch_ohlcv(
-            ticker=ticker,
-            interval=interval,
-            count=current_count,
-            to=to,
-        )
+    if df is None or df.empty:
+        raise ValueError(f"OHLCV 데이터를 가져오지 못했습니다. ticker={ticker}")
 
-        if df.empty:
-            break
-
-        dfs.append(df)
-        fetched += len(df)
-
-        # 다음 요청은 현재 받아온 데이터의 가장 이른 시점 이전으로 이동
-        earliest_dt = pd.to_datetime(df["datetime"].min())
-        to = earliest_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        time.sleep(sleep_sec)
-
-        # 혹시 같은 데이터만 반복 수집되는 비정상 상황 방지
-        if len(df) < current_count:
-            break
-
-    if not dfs:
-        raise ValueError("과거 데이터를 하나도 수집하지 못했습니다.")
-
-    result = pd.concat(dfs, ignore_index=True)
+    result = df.copy()
+    result = result.reset_index().rename(columns={"index": "datetime"})
+    result["ticker"] = ticker
     result["datetime"] = pd.to_datetime(result["datetime"])
-    result = result.sort_values("datetime").drop_duplicates(subset=["datetime"], keep="last")
+    result = result.sort_values("datetime")
+    result = result.drop_duplicates(subset=["datetime"], keep="last")
     result = result.reset_index(drop=True)
 
     return result
@@ -179,7 +160,7 @@ def save_raw_data(
 # =========================
 # 실행용 함수
 # =========================
-def collect_and_save_latest(count: int = 500) -> Path:
+def collect_and_save_latest(count: int = 10080) -> Path:
     """
     최신 기준으로 count개 수집 후 저장
     기존 파일이 있으면 병합 후 저장
@@ -210,10 +191,13 @@ def collect_and_save_latest(count: int = 500) -> Path:
 def main() -> None:
     """
     기본 실행:
-    KRW-BTC 1분봉 최신 1000개 수집 후 raw CSV 저장
+    KRW-BTC 1분봉 최신 7일치 수집 후 raw CSV 저장
     """
+    MINUTES_PER_DAY = 60 * 24
+    DAYS_TO_COLLECT = 7
+
     try:
-        collect_and_save_latest(count=1000)
+        collect_and_save_latest(count=DAYS_TO_COLLECT * MINUTES_PER_DAY)
     except Exception as e:
         print(f"[ERROR] 데이터 수집 실패: {e}")
 

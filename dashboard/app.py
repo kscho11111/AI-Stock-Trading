@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, time
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -43,12 +44,50 @@ def load_signal_data(file_path: Path = SIGNAL_FILE_PATH) -> pd.DataFrame:
 
 
 # =========================
+# 데이터 필터링
+# =========================
+def filter_data(
+    df: pd.DataFrame,
+    mode: str,
+    candle_count: int,
+    start_dt: datetime | None = None,
+    end_dt: datetime | None = None,
+) -> pd.DataFrame:
+    filtered_df = df.copy()
+
+    if mode == "최근 N개":
+        filtered_df = filtered_df.tail(candle_count).copy()
+
+    elif mode == "최근 1일":
+        latest_dt = filtered_df["datetime"].max()
+        cutoff = latest_dt - timedelta(days=1)
+        filtered_df = filtered_df[filtered_df["datetime"] >= cutoff].copy()
+
+    elif mode == "최근 3일":
+        latest_dt = filtered_df["datetime"].max()
+        cutoff = latest_dt - timedelta(days=3)
+        filtered_df = filtered_df[filtered_df["datetime"] >= cutoff].copy()
+
+    elif mode == "최근 7일":
+        latest_dt = filtered_df["datetime"].max()
+        cutoff = latest_dt - timedelta(days=7)
+        filtered_df = filtered_df[filtered_df["datetime"] >= cutoff].copy()
+
+    elif mode == "직접 시간 지정":
+        if start_dt is not None:
+            filtered_df = filtered_df[filtered_df["datetime"] >= start_dt].copy()
+        if end_dt is not None:
+            filtered_df = filtered_df[filtered_df["datetime"] <= end_dt].copy()
+
+    return filtered_df.reset_index(drop=True)
+
+
+# =========================
 # 차트 생성
 # =========================
 def make_price_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
-    # 캔들 차트
     fig.add_trace(
         go.Candlestick(
             x=df["datetime"],
@@ -60,7 +99,6 @@ def make_price_chart(df: pd.DataFrame) -> go.Figure:
         )
     )
 
-    # 이동평균선
     if "ma5" in df.columns:
         fig.add_trace(
             go.Scatter(
@@ -81,7 +119,6 @@ def make_price_chart(df: pd.DataFrame) -> go.Figure:
             )
         )
 
-    # 매수 / 매도 포인트
     if "signal" in df.columns:
         buy_df = df[df["signal"] == "BUY"]
         sell_df = df[df["signal"] == "SELL"]
@@ -127,16 +164,22 @@ def main() -> None:
     st.write("Phase 1 - BTC 1분봉 패턴 기반 방향성 분석")
 
     st.sidebar.header("설정")
+
+    view_mode = st.sidebar.selectbox(
+        "조회 방식",
+        ["최근 N개", "최근 1일", "최근 3일", "최근 7일", "직접 시간 지정"],
+    )
+
     candle_count = st.sidebar.slider(
         "최근 몇 개 캔들을 볼지",
         min_value=50,
-        max_value=500,
-        value=200,
-        step=10,
+        max_value=2000,
+        value=500,
+        step=50,
     )
 
-    if st.sidebar.button("새로고침"):
-        st.cache_data.clear()
+    start_dt = None
+    end_dt = None
 
     try:
         df = load_signal_data(SIGNAL_FILE_PATH)
@@ -148,8 +191,55 @@ def main() -> None:
         st.warning("표시할 데이터가 없습니다.")
         return
 
-    # 최근 일부만 보기
-    display_df = df.tail(candle_count).copy()
+    min_dt = df["datetime"].min()
+    max_dt = df["datetime"].max()
+
+    if view_mode == "직접 시간 지정":
+        st.sidebar.subheader("시간 직접 지정")
+
+        start_date = st.sidebar.date_input(
+            "시작 날짜",
+            value=min_dt.date(),
+            min_value=min_dt.date(),
+            max_value=max_dt.date(),
+        )
+        start_time = st.sidebar.time_input(
+            "시작 시간",
+            value=time(0, 0),
+        )
+
+        end_date = st.sidebar.date_input(
+            "종료 날짜",
+            value=max_dt.date(),
+            min_value=min_dt.date(),
+            max_value=max_dt.date(),
+        )
+        end_time = st.sidebar.time_input(
+            "종료 시간",
+            value=max_dt.time().replace(second=0, microsecond=0),
+        )
+
+        start_dt = datetime.combine(start_date, start_time)
+        end_dt = datetime.combine(end_date, end_time)
+
+        if start_dt > end_dt:
+            st.error("시작 시간이 종료 시간보다 늦습니다.")
+            return
+
+    if st.sidebar.button("새로고침"):
+        st.cache_data.clear()
+
+    display_df = filter_data(
+        df=df,
+        mode=view_mode,
+        candle_count=candle_count,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+
+    if display_df.empty:
+        st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
+        return
 
     latest = display_df.iloc[-1]
 
@@ -172,6 +262,11 @@ def main() -> None:
         f"{latest['pattern_avg_distance']:.6f}" if pd.notna(latest.get("pattern_avg_distance")) else "N/A",
     )
 
+    st.caption(
+        f"조회 구간: {display_df['datetime'].min()} ~ {display_df['datetime'].max()} "
+        f"(총 {len(display_df):,}개 캔들)"
+    )
+
     st.subheader("가격 차트")
     fig = make_price_chart(display_df)
     st.plotly_chart(fig, use_container_width=True)
@@ -188,7 +283,7 @@ def main() -> None:
     ]
     existing_signal_cols = [col for col in signal_cols if col in display_df.columns]
 
-    recent_signal_df = display_df[display_df["signal"].isin(["BUY", "SELL", "HOLD"])][existing_signal_cols].tail(30)
+    recent_signal_df = display_df[existing_signal_cols].tail(50)
     st.dataframe(recent_signal_df, use_container_width=True)
 
     st.subheader("최근 원본+feature 데이터")
@@ -205,7 +300,7 @@ def main() -> None:
         "signal",
     ]
     existing_raw_cols = [col for col in raw_cols if col in display_df.columns]
-    st.dataframe(display_df[existing_raw_cols].tail(30), use_container_width=True)
+    st.dataframe(display_df[existing_raw_cols].tail(50), use_container_width=True)
 
 
 if __name__ == "__main__":
